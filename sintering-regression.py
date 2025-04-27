@@ -410,7 +410,6 @@ def analyze_target_precision(df, target_col, plot=True):
         plt.legend()
         
         plt.tight_layout()
-        plt.savefig('target_precision_analysis.png')
         plt.show()
         plt.close()
     
@@ -743,7 +742,6 @@ def plot_feature_importance(model, feature_names, model_name, top_n=15):
     plt.ylabel('Feature')
     plt.title(f'Top {top_n} Feature Importance - {model_name}')
     plt.tight_layout()
-    plt.savefig(f'feature_importance_{model_name.replace(" ", "_")}.png')
     plt.show()
     plt.close()
 
@@ -785,7 +783,7 @@ def plot_actual_vs_predicted(y_true, y_pred, model_name, approach):
 
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
-    plt.savefig(f'actual_vs_predicted_{model_name.replace(" ", "_")}_approach_{approach}.png')
+    plt.show()
     plt.close()
 
 
@@ -823,7 +821,7 @@ def plot_time_series_prediction(y_true, y_pred, model_name, approach):
 
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
-    plt.savefig(f'time_series_{model_name.replace(" ", "_")}_approach_{approach}.png')
+    plt.show()
     plt.close()
 
 
@@ -861,7 +859,7 @@ def plot_residuals(y_true, y_pred, model_name, approach):
     plt.suptitle(f'Residual Analysis - {model_name} (Approach {approach})', y=1.05)
 
     plt.tight_layout()
-    plt.savefig(f'residuals_{model_name.replace(" ", "_")}_approach_{approach}.png')
+    plt.show()
     plt.close()
 
 
@@ -1012,8 +1010,7 @@ def plot_smoothing_comparison(y_true, y_pred_orig, y_pred_medium, y_pred_high, m
     fig2.suptitle(f'Smoothing Analysis - {model_name}', fontsize=16, y=0.98)
     
     plt.tight_layout()
-    fig.savefig(f'smoothing_comparison_{model_name.replace(" ", "_")}.png')
-    fig2.savefig(f'smoothing_analysis_{model_name.replace(" ", "_")}.png')
+    plt.show()
     plt.close('all')
     
     # Print summary comparison

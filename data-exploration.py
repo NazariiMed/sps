@@ -165,8 +165,7 @@ def plot_target_variable(df, target_col='Rel. Piston Trav'):
             axes[j].set_visible(False)
 
         plt.tight_layout()
-        plt.savefig('feature_correlations.png')
-        plt.show()  # Add this line to display the plot
+        plt.show()
         plt.close()
 
 
@@ -214,8 +213,7 @@ def analyze_feature_distributions(df):
         axes[j].set_visible(False)
 
     plt.tight_layout()
-    plt.savefig('feature_distributions.png')
-    plt.show()  # Add this line to display the plot
+    plt.show()
     plt.close()
 
 
@@ -243,8 +241,7 @@ def plot_time_series_by_file(df, target_col='Rel. Piston Trav'):
     plt.ylabel(target_col)
     plt.legend()
     plt.grid(True, alpha=0.3)
-    plt.savefig('time_series_by_file.png')
-    plt.show()  # Add this line to display the plot
+    plt.show()
     plt.close()
 
 
@@ -261,7 +258,7 @@ def main():
         analyze_feature_distributions(combined_df)
         plot_time_series_by_file(combined_df)
 
-        print("\nData exploration complete. Plots saved.")
+        print("\nData exploration complete.")
 
 
 if __name__ == "__main__":
