@@ -31,7 +31,7 @@ file_paths = [
 ]
 
 # Configuration for regression approaches
-APPROACH = 2  # 1: Standard approach, 2: Window approach, 3: Virtual experiment
+APPROACH = 1  # 1: Standard approach, 2: Window approach, 3: Virtual experiment
 VALIDATION_FILE_INDEX = 3  # Use the 4th file for validation (0-indexed)
 TARGET_COLUMN = 'Rel. Piston Trav'
 EXCLUDED_COLUMNS = ['Abs. Piston Trav', 'Nr.', 'Datum', 'Zeit']  # Columns to exclude
@@ -861,6 +861,101 @@ def plot_residuals(y_true, y_pred, model_name, approach):
     plt.tight_layout()
     plt.show()
     plt.close()
+    
+
+def plot_model_comparison(y_true, all_predictions, approach, metric='rmse'):
+    """
+    Create a comparison plot for all models' predictions.
+    
+    Args:
+        y_true: The actual target values
+        all_predictions: Dictionary with model names as keys and predictions as values
+        approach: The regression approach used
+        metric: Metric to sort by ('rmse' or 'r2')
+    """
+    # Calculate metrics for all models
+    metrics = {}
+    for model_name, y_pred in all_predictions.items():
+        rmse = np.sqrt(mean_squared_error(y_true, y_pred))
+        r2 = r2_score(y_true, y_pred)
+        metrics[model_name] = {'rmse': rmse, 'r2': r2}
+    
+    # Sort models by the specified metric
+    if metric.lower() == 'rmse':
+        sorted_models = sorted(metrics.keys(), key=lambda m: metrics[m]['rmse'])
+    else:  # r2
+        sorted_models = sorted(metrics.keys(), key=lambda m: -metrics[m]['r2'])  # Higher R² is better
+    
+    # Create figure with 2 subplots: time series and metrics comparison
+    fig, axes = plt.subplots(2, 1, figsize=(15, 12))
+    
+    # Plot 1: Time series of all model predictions (just a section for clarity)
+    max_display_points = 500  # Avoid overcrowding the plot
+    display_length = min(len(y_true), max_display_points)
+    start_idx = 0
+    if len(y_true) > max_display_points:
+        # Choose a representative middle section
+        start_idx = (len(y_true) - max_display_points) // 2
+    end_idx = start_idx + display_length
+    
+    # Plot actual values
+    axes[0].plot(range(display_length), y_true[start_idx:end_idx], 
+             label='Actual', linewidth=2, color='black')
+    
+    # Plot predictions for each model
+    colors = plt.cm.tab10.colors  # Use a colormap for different models
+    for i, model_name in enumerate(sorted_models):
+        y_pred = all_predictions[model_name][start_idx:end_idx]
+        axes[0].plot(range(display_length), y_pred, 
+                 label=f'{model_name}', linewidth=1.5, alpha=0.7,
+                 color=colors[i % len(colors)])
+    
+    axes[0].set_xlabel('Time Step')
+    axes[0].set_ylabel('Target Value')
+    axes[0].set_title(f'Model Predictions Comparison (Section {start_idx}-{end_idx})')
+    axes[0].legend(loc='best')
+    axes[0].grid(True, alpha=0.3)
+    
+    # Plot 2: Bar chart of model metrics
+    x = np.arange(len(sorted_models))
+    width = 0.35
+    
+    # RMSE bars (lower is better)
+    rmse_values = [metrics[model]['rmse'] for model in sorted_models]
+    axes[1].bar(x - width/2, rmse_values, width, label='RMSE', color='red', alpha=0.7)
+    
+    # R² bars (higher is better)
+    r2_values = [metrics[model]['r2'] for model in sorted_models]
+    axes[1].bar(x + width/2, r2_values, width, label='R²', color='blue', alpha=0.7)
+    
+    # Add labels and annotations
+    axes[1].set_xlabel('Model')
+    axes[1].set_ylabel('Metric Value')
+    axes[1].set_title('Performance Metrics Comparison')
+    axes[1].set_xticks(x)
+    axes[1].set_xticklabels(sorted_models, rotation=45, ha='right')
+    axes[1].legend()
+    
+    # Add value labels on the bars
+    for i, v in enumerate(rmse_values):
+        axes[1].text(i - width/2, v + 0.02, f'{v:.3f}', ha='center', va='bottom', fontsize=8)
+    
+    for i, v in enumerate(r2_values):
+        axes[1].text(i + width/2, v + 0.02, f'{v:.3f}', ha='center', va='bottom', fontsize=8)
+    
+    # Add horizontal line at 0 for R² reference
+    axes[1].axhline(y=0, color='gray', linestyle='--', alpha=0.7)
+    
+    # Set different y-scale for second axis to better visualize R² values
+    ax2 = axes[1].twinx()
+    ax2.set_ylabel('R² Score', color='blue')
+    ax2.set_ylim(min(r2_values) - 0.1, max(r2_values) + 0.1)
+    ax2.tick_params(axis='y', labelcolor='blue')
+    
+    plt.suptitle(f'Model Comparison Summary - Approach {approach}', fontsize=16, y=0.98)
+    plt.tight_layout()
+    plt.show()
+    plt.close()
 
 
 def plot_smoothing_comparison(y_true, y_pred_orig, y_pred_medium, y_pred_high, model_name):
@@ -1076,21 +1171,39 @@ def main():
         print(f"  R²: {val_metrics['r2']:.4f}")
         print(f"  MAE: {val_metrics['mae']:.4f}")
 
-        # Plot results for best model
+        # Plot results for all models
+        # First for the best model
         best_model_name = results[0]['model']
 
-        # Plot feature importance if available
+        # Plot feature importance if available for best model
         if hasattr(best_model, 'feature_importances_') or hasattr(best_model, 'coef_'):
             plot_feature_importance(best_model, feature_names, best_model_name)
-
-        # Plot actual vs predicted
-        plot_actual_vs_predicted(y_val, y_val_pred, best_model_name, APPROACH)
-
-        # Plot time series prediction
-        plot_time_series_prediction(y_val, y_val_pred, best_model_name, APPROACH)
-
-        # Plot residuals
-        plot_residuals(y_val, y_val_pred, best_model_name, APPROACH)
+            
+        # Evaluate and plot for all models
+        print("\nEvaluating all models on validation data:")
+        all_predictions = {}
+        for model_name, model in all_models.items():
+            # Scale the validation data
+            X_val_scaled = scaler.transform(X_val)
+            # Get predictions for this model
+            model_metrics, model_y_val_pred = evaluate_model(model, X_val_scaled, y_val, f"{model_name} (Validation)")
+            
+            # Store predictions for comparison plot
+            all_predictions[model_name] = model_y_val_pred
+            
+            print(f"  {model_name} - RMSE: {model_metrics['rmse']:.4f}, R²: {model_metrics['r2']:.4f}, MAE: {model_metrics['mae']:.4f}")
+            
+            # Plot actual vs predicted
+            plot_actual_vs_predicted(y_val, model_y_val_pred, model_name, APPROACH)
+            
+            # Plot time series prediction
+            plot_time_series_prediction(y_val, model_y_val_pred, model_name, APPROACH)
+            
+            # Plot residuals
+            plot_residuals(y_val, model_y_val_pred, model_name, APPROACH)
+            
+        # Plot comparison of all models
+        plot_model_comparison(y_val, all_predictions, APPROACH)
 
     elif APPROACH == 2:
         # Window approach: use previous step data and target to predict next step
@@ -1132,21 +1245,39 @@ def main():
         print(f"  R²: {val_metrics['r2']:.4f}")
         print(f"  MAE: {val_metrics['mae']:.4f}")
 
-        # Plot results for best model
+        # Plot results for all models
+        # First for the best model
         best_model_name = results[0]['model']
 
-        # Plot feature importance if available
+        # Plot feature importance if available for best model
         if hasattr(best_model, 'feature_importances_') or hasattr(best_model, 'coef_'):
             plot_feature_importance(best_model, window_feature_names, best_model_name)
-
-        # Plot actual vs predicted
-        plot_actual_vs_predicted(y_val_window, y_val_pred, best_model_name, APPROACH)
-
-        # Plot time series prediction
-        plot_time_series_prediction(y_val_window, y_val_pred, best_model_name, APPROACH)
-
-        # Plot residuals
-        plot_residuals(y_val_window, y_val_pred, best_model_name, APPROACH)
+            
+        # Evaluate and plot for all models
+        print("\nEvaluating all models on validation data:")
+        all_predictions = {}
+        for model_name, model in all_models.items():
+            # Scale the validation data
+            X_val_window_scaled = scaler.transform(X_val_window)
+            # Get predictions for this model
+            model_metrics, model_y_val_pred = evaluate_model(model, X_val_window_scaled, y_val_window, f"{model_name} (Validation)")
+            
+            # Store predictions for comparison plot
+            all_predictions[model_name] = model_y_val_pred
+            
+            print(f"  {model_name} - RMSE: {model_metrics['rmse']:.4f}, R²: {model_metrics['r2']:.4f}, MAE: {model_metrics['mae']:.4f}")
+            
+            # Plot actual vs predicted
+            plot_actual_vs_predicted(y_val_window, model_y_val_pred, model_name, APPROACH)
+            
+            # Plot time series prediction
+            plot_time_series_prediction(y_val_window, model_y_val_pred, model_name, APPROACH)
+            
+            # Plot residuals
+            plot_residuals(y_val_window, model_y_val_pred, model_name, APPROACH)
+            
+        # Plot comparison of all models
+        plot_model_comparison(y_val_window, all_predictions, APPROACH)
 
     elif APPROACH == 3:
         # Virtual experiment: similar to approach 2, but using predicted targets
@@ -1210,17 +1341,39 @@ def main():
         print(f"  Window approach RMSE: {val_metrics['rmse']:.4f}, Virtual experiment RMSE: {virtual_rmse:.4f}")
         print(f"  Window approach R²: {val_metrics['r2']:.4f}, Virtual experiment R²: {virtual_r2:.4f}")
 
-        # Plot results for virtual experiment
-        best_model_name = results[0]['model']
-
-        # Plot actual vs predicted
-        plot_actual_vs_predicted(y_virtual_true, y_virtual_pred, best_model_name, APPROACH)
-
-        # Plot time series prediction
-        plot_time_series_prediction(y_virtual_true, y_virtual_pred, best_model_name, APPROACH)
-
-        # Plot residuals
-        plot_residuals(y_virtual_true, y_virtual_pred, best_model_name, APPROACH)
+        # Plot results for virtual experiment with all models
+        print("\nRunning virtual experiment for all models:")
+        all_predictions = {}
+        all_true_values = None
+        for model_name, model in all_models.items():
+            # Run virtual experiment for this model
+            model_y_virtual_pred, model_y_virtual_true = virtual_experiment(
+                model, X_val_window_scaled, y_val, window_feature_names, window_size)
+            
+            # Store for comparison plot
+            all_predictions[model_name] = model_y_virtual_pred
+            if all_true_values is None:
+                all_true_values = model_y_virtual_true  # Should be the same for all models
+            
+            # Calculate metrics for this model's virtual experiment
+            model_virtual_mse = mean_squared_error(model_y_virtual_true, model_y_virtual_pred)
+            model_virtual_rmse = np.sqrt(model_virtual_mse)
+            model_virtual_mae = mean_absolute_error(model_y_virtual_true, model_y_virtual_pred)
+            model_virtual_r2 = r2_score(model_y_virtual_true, model_y_virtual_pred)
+            
+            print(f"  {model_name} - RMSE: {model_virtual_rmse:.4f}, R²: {model_virtual_r2:.4f}, MAE: {model_virtual_mae:.4f}")
+            
+            # Plot actual vs predicted
+            plot_actual_vs_predicted(model_y_virtual_true, model_y_virtual_pred, model_name, APPROACH)
+            
+            # Plot time series prediction
+            plot_time_series_prediction(model_y_virtual_true, model_y_virtual_pred, model_name, APPROACH)
+            
+            # Plot residuals
+            plot_residuals(model_y_virtual_true, model_y_virtual_pred, model_name, APPROACH)
+            
+        # Plot comparison of all models
+        plot_model_comparison(all_true_values, all_predictions, APPROACH)
 
     else:
         raise ValueError(f"Unknown approach: {APPROACH}")
