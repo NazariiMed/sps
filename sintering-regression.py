@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.model_selection import train_test_split, cross_val_score, GridSearchCV, RandomizedSearchCV
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
 from sklearn.linear_model import LinearRegression, Ridge, Lasso, ElasticNet
@@ -10,9 +10,19 @@ from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
 from sklearn.svm import SVR
 from sklearn.tree import DecisionTreeRegressor
 from sklearn.neighbors import KNeighborsRegressor
+from sklearn.neural_network import MLPRegressor
+from sklearn.gaussian_process import GaussianProcessRegressor
+from sklearn.gaussian_process.kernels import RBF, Matern, WhiteKernel, ConstantKernel as C
 from sklearn.model_selection import GridSearchCV, RandomizedSearchCV
-from skopt import BayesSearchCV
-from skopt.space import Real, Integer, Categorical
+
+# Try to import Bayesian optimization libraries
+try:
+    from skopt import BayesSearchCV
+    from skopt.space import Real, Integer, Categorical
+    BAYESIAN_AVAILABLE = True
+except ImportError:
+    BAYESIAN_AVAILABLE = False
+    print("Bayesian optimization libraries not available. Will use RandomizedSearchCV instead.")
 import xgboost as xgb
 import lightgbm as lgb
 import warnings
@@ -31,7 +41,7 @@ file_paths = [
 ]
 
 # Configuration for regression approaches
-APPROACH = 1  # 1: Standard approach, 2: Window approach, 3: Virtual experiment
+APPROACH = 2  # 1: Standard approach, 2: Window approach, 3: Virtual experiment
 VALIDATION_FILE_INDEX = 3  # Use the 4th file for validation (0-indexed)
 TARGET_COLUMN = 'Rel. Piston Trav'
 EXCLUDED_COLUMNS = ['Abs. Piston Trav', 'Nr.', 'Datum', 'Zeit']  # Columns to exclude
@@ -56,7 +66,9 @@ MODELS_TO_EVALUATE = {
     'XGBoost': True,
     'LightGBM': False,
     'SVR': True,
-    'KNN': True
+    'KNN': True,
+    'MLP': True,
+    'GPR': True
 }
 
 # Hyperparameter tuning settings
@@ -488,13 +500,13 @@ def tune_hyperparameters(model_class, param_grid, X_train, y_train, method='grid
         best_model: Tuned model
         best_params: Best hyperparameter values
     """
-    # Debug: Print shapes
-    print(f"  In tune_hyperparameters - X_train shape: {X_train.shape}, y_train shape: {y_train.shape}")
+    print(f"  Tuning hyperparameters using {method} search...")
+    print(f"  X_train shape: {X_train.shape}, y_train shape: {y_train.shape}")
 
     if method == 'grid':
         search = GridSearchCV(
             model_class(), param_grid, cv=cv, scoring='neg_mean_squared_error',
-            verbose=0, n_jobs=-1
+            verbose=1, n_jobs=-1
         )
         search.fit(X_train, y_train)
         best_model = search.best_estimator_
@@ -503,27 +515,58 @@ def tune_hyperparameters(model_class, param_grid, X_train, y_train, method='grid
     elif method == 'random':
         search = RandomizedSearchCV(
             model_class(), param_grid, n_iter=n_iter, cv=cv,
-            scoring='neg_mean_squared_error', verbose=0, random_state=42, n_jobs=-1
+            scoring='neg_mean_squared_error', verbose=1, random_state=42, n_jobs=-1
         )
         search.fit(X_train, y_train)
         best_model = search.best_estimator_
         best_params = search.best_params_
 
     elif method == 'bayesian':
-        # For debugging, use RandomizedSearchCV instead of BayesSearchCV
-        search = RandomizedSearchCV(
-            model_class(), param_grid, n_iter=n_iter, cv=cv,
-            scoring='neg_mean_squared_error', verbose=0, random_state=42, n_jobs=-1
-        )
-        search.fit(X_train, y_train)
-        best_model = search.best_estimator_
-        best_params = search.best_params_
+        if BAYESIAN_AVAILABLE:
+            # Convert param_grid to skopt space format
+            search_space = {}
+            for param, values in param_grid.items():
+                # If parameter values are a list
+                if isinstance(values, list):
+                    # Check types of values to determine space type
+                    if all(isinstance(v, bool) for v in values) or all(isinstance(v, str) for v in values):
+                        search_space[param] = Categorical(values)
+                    elif all(isinstance(v, int) for v in values):
+                        search_space[param] = Integer(min(values), max(values))
+                    elif all(isinstance(v, float) for v in values):
+                        search_space[param] = Real(min(values), max(values), prior='log-uniform')
+                    else:
+                        # Mixed types or other - use categorical
+                        search_space[param] = Categorical(values)
+                # If parameter values are already a dictionary or distribution
+                else:
+                    search_space[param] = values
+                    
+            print(f"  Created Bayesian search space: {search_space}")
+            
+            # Create and run BayesSearchCV
+            search = BayesSearchCV(
+                model_class(), search_space, n_iter=n_iter, cv=cv,
+                scoring='neg_mean_squared_error', verbose=1, random_state=42, n_jobs=-1
+            )
+            search.fit(X_train, y_train)
+            best_model = search.best_estimator_
+            best_params = search.best_params_
+        else:
+            print("  Bayesian optimization not available, falling back to RandomizedSearchCV")
+            search = RandomizedSearchCV(
+                model_class(), param_grid, n_iter=n_iter, cv=cv,
+                scoring='neg_mean_squared_error', verbose=1, random_state=42, n_jobs=-1
+            )
+            search.fit(X_train, y_train)
+            best_model = search.best_estimator_
+            best_params = search.best_params_
 
     else:
         raise ValueError(f"Unknown tuning method: {method}")
 
-    # Debug: check fitted model
-    print(f"  Fitted model: {best_model}")
+    print(f"  Best params: {best_params}")
+    print(f"  Best model: {best_model}")
 
     return best_model, best_params
 
@@ -654,6 +697,32 @@ def build_and_evaluate_models(X_train, y_train, X_test, y_test):
             'n_neighbors': [3, 5, 7, 9, 11, 13, 15],
             'weights': ['uniform', 'distance'],
             'algorithm': ['auto', 'ball_tree', 'kd_tree', 'brute']
+        }
+        
+    # Neural Network model
+    if MODELS_TO_EVALUATE.get('MLP', False):
+        models['MLP'] = MLPRegressor(random_state=42, max_iter=1000)
+        param_grids['MLP'] = {
+            'hidden_layer_sizes': [(50,), (100,), (50, 50), (100, 50)],
+            'activation': ['relu', 'tanh'],
+            'solver': ['adam', 'sgd'],
+            'alpha': [0.0001, 0.001, 0.01],
+            'learning_rate': ['constant', 'adaptive']
+        }
+        
+    # Gaussian Process Regression
+    if MODELS_TO_EVALUATE.get('GPR', False):
+        # Define kernels to try
+        kernel_rbf = C(1.0, (1e-3, 1e3)) * RBF(1.0, (1e-2, 1e2))
+        kernel_matern = C(1.0, (1e-3, 1e3)) * Matern(1.0, (1e-2, 1e2), nu=1.5)
+        kernel_rbf_white = C(1.0, (1e-3, 1e3)) * RBF(1.0, (1e-2, 1e2)) + WhiteKernel(0.1)
+        
+        models['GPR'] = GaussianProcessRegressor(random_state=42)
+        param_grids['GPR'] = {
+            'kernel': [kernel_rbf, kernel_matern, kernel_rbf_white],
+            'alpha': [1e-10, 1e-8, 1e-6],
+            'normalize_y': [True, False],
+            'n_restarts_optimizer': [0, 1, 3]
         }
 
     # Train and evaluate models
