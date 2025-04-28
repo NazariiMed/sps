@@ -64,7 +64,6 @@ MODELS_TO_EVALUATE = {
     'Random Forest': True,
     'Gradient Boosting': True,
     'XGBoost': True,
-    'LightGBM': False,
     'SVR': True,
     'KNN': True,
     'MLP': True,
@@ -318,31 +317,31 @@ def virtual_experiment(model, X_val, y_val, feature_names, window_size=1):
 def analyze_target_precision(df, target_col, plot=True):
     """
     Analyze the precision issues in the target column.
-    
+
     Args:
         df: DataFrame containing the target column
         target_col: Name of the target column
         plot: Whether to generate plots
-        
+
     Returns:
         dict: Dictionary with precision analysis results
     """
     print(f"\nAnalyzing precision issues in '{target_col}'...")
-    
+
     # Extract target column
     target_values = df[target_col].values
-    
+
     # Calculate differences between consecutive values
     differences = np.diff(target_values)
     non_zero_diffs = differences[differences != 0]
-    
+
     # Ensure we have absolute differences for calculations that need positive values
     abs_non_zero_diffs = np.abs(non_zero_diffs)
-    
+
     # Count occurrences of repeated values
     consecutive_repeats = []
     current_count = 1
-    
+
     for i in range(1, len(target_values)):
         if abs(target_values[i] - target_values[i-1]) < 1e-10:
             current_count += 1
@@ -350,11 +349,11 @@ def analyze_target_precision(df, target_col, plot=True):
             if current_count > 1:
                 consecutive_repeats.append(current_count)
             current_count = 1
-    
+
     # Add the last group if it's a repeat
     if current_count > 1:
         consecutive_repeats.append(current_count)
-    
+
     # Calculate statistics
     results = {
         'unique_values': df[target_col].nunique(),
@@ -369,7 +368,7 @@ def analyze_target_precision(df, target_col, plot=True):
         'max_consecutive_repeats': max(consecutive_repeats) if consecutive_repeats else 0,
         'avg_consecutive_repeats': np.mean(consecutive_repeats) if consecutive_repeats else 0
     }
-    
+
     # Print results
     print(f"  Unique values: {results['unique_values']} out of {results['total_values']} total values")
     print(f"  Minimum non-zero difference: {results['min_nonzero_diff']:.8f}")
@@ -379,7 +378,7 @@ def analyze_target_precision(df, target_col, plot=True):
     print(f"  Zero differences: {results['zero_diff_count']} ({results['zero_diff_percentage']:.2f}% of all consecutive pairs)")
     print(f"  Maximum consecutive repeated values: {results['max_consecutive_repeats']}")
     print(f"  Average run length of repeated values: {results['avg_consecutive_repeats']:.2f}")
-    
+
     # Generate plots if requested
     if plot:
         # Plot 1: Histogram of non-zero differences
@@ -389,42 +388,42 @@ def analyze_target_precision(df, target_col, plot=True):
         plt.xlabel('Non-zero differences between consecutive values')
         plt.ylabel('Frequency')
         plt.title('Distribution of non-zero differences')
-        
+
         # Plot 2: Time series of values
         plt.subplot(2, 2, 2)
         plt.plot(target_values[:1000])  # Just plot first 1000 for clarity
         plt.xlabel('Index')
         plt.ylabel(target_col)
         plt.title(f'{target_col} values (first 1000 points)')
-        
+
         # Plot 3: Histogram of consecutive repeats
         plt.subplot(2, 2, 3)
         plt.hist(consecutive_repeats, bins=30, alpha=0.7)
         plt.xlabel('Number of consecutive repeats')
         plt.ylabel('Frequency')
         plt.title('Distribution of consecutive repeated values')
-        
+
         # Plot 4: Original vs. smoothed data
         plt.subplot(2, 2, 4)
-        
+
         # Sample points for demonstration
         sample = target_values[:1000]
-        
+
         # Create a smoothed version by adding tiny noise
         noise_scale = results['min_abs_nonzero_diff']/10
         smoothed = sample + np.random.normal(0, noise_scale, len(sample))
-        
+
         plt.plot(sample, label='Original', alpha=0.7)
         plt.plot(smoothed, label='With tiny noise', alpha=0.7)
         plt.xlabel('Index')
         plt.ylabel(target_col)
         plt.title('Original vs. noise-added values')
         plt.legend()
-        
+
         plt.tight_layout()
         plt.show()
         plt.close()
-    
+
     return results
 
 
@@ -483,7 +482,7 @@ def scale_data(X_train, X_test):
     return X_train_scaled, X_test_scaled, scaler
 
 
-def tune_hyperparameters(model_class, param_grid, X_train, y_train, method='grid', cv=5, n_iter=20):
+def tune_hyperparameters(model_class, param_grid, X_train, y_train, method='grid', cv=5, n_iter=20, model_name=None):
     """
     Tune hyperparameters for a model.
 
@@ -541,15 +540,130 @@ def tune_hyperparameters(model_class, param_grid, X_train, y_train, method='grid
                 # If parameter values are already a dictionary or distribution
                 else:
                     search_space[param] = values
-                    
+
             print(f"  Created Bayesian search space: {search_space}")
-            
-            # Create and run BayesSearchCV
-            search = BayesSearchCV(
-                model_class(), search_space, n_iter=n_iter, cv=cv,
-                scoring='neg_mean_squared_error', verbose=1, random_state=42, n_jobs=-1
-            )
-            search.fit(X_train, y_train)
+
+            # Special handling for models that need parameter mapping
+            model_instance = model_class()
+            if model_name == 'GPR' and 'kernel' in search_space:
+                # Create a modified search with a custom kernel mapping
+                def map_kernel(params):
+                    # Map numeric values to actual kernels
+                    if 'kernel' in params and isinstance(params['kernel'], int):
+                        kernel_map = {
+                            1: C(1.0, (1e-3, 1e3)) * RBF(1.0, (1e-2, 1e2)),
+                            2: C(1.0, (1e-3, 1e3)) * Matern(1.0, (1e-2, 1e2), nu=1.5),
+                            3: C(1.0, (1e-3, 1e3)) * RBF(1.0, (1e-2, 1e2)) + WhiteKernel(0.1)
+                        }
+                        params['kernel'] = kernel_map.get(params['kernel'], kernel_map[1])
+                    return params
+
+                # Use a subset of data for GPR to speed up training
+                subset_size = min(1000, len(X_train))
+                idx = np.random.choice(len(X_train), subset_size, replace=False)
+                X_subset = X_train[idx]
+                y_subset = y_train[idx]
+
+                # Manual Bayesian optimization for GPR
+                best_score = float('-inf')
+                best_params = {}
+                best_model = None  # Initialize best_model
+
+                for _ in range(n_iter):
+                    # Sample parameters randomly from the space
+                    params = {}
+                    for param, space in search_space.items():
+                        if hasattr(space, 'rvs'):  # It's a distribution
+                            params[param] = space.rvs(1)[0]
+                        elif isinstance(space, list):  # It's a list of values
+                            params[param] = np.random.choice(space)
+
+                    # Map parameters for kernels
+                    params = map_kernel(params)
+
+                    # Create and fit model with these parameters
+                    try:
+                        model = model_class(**params)
+                        model.fit(X_subset, y_subset)
+                        # Score model
+                        score = -mean_squared_error(y_subset, model.predict(X_subset))  # Neg MSE
+                        if score > best_score:
+                            best_score = score
+                            best_params = params
+                            best_model = model
+                    except Exception as e:
+                        print(f"  Skipping parameters due to error: {e}")
+                        continue
+                    
+                print(f"  Best params: {best_params}")
+                if best_model is None:
+                    # Fallback if no model was successfully trained
+                    print("  No successful model training, using default parameters")
+                    best_model = model_class()
+                    kernel_rbf = C(1.0) * RBF(1.0)
+                    best_model.set_params(kernel=kernel_rbf, alpha=1e-6)
+                    best_model.fit(X_subset, y_subset)
+                return best_model, best_params
+            elif model_name == 'MLP' and 'hidden_layer_sizes' in search_space:
+                # Create a modified search with a custom hidden_layer_sizes mapping
+                def map_hidden_layers(params):
+                    # Map numeric values to actual tuples for hidden_layer_sizes
+                    if 'hidden_layer_sizes' in params and isinstance(params['hidden_layer_sizes'], (int, float)):
+                        # Map integers to hidden layer configurations
+                        layer_map = {
+                            1: (50,),
+                            2: (100,),
+                            3: (50, 50),
+                            4: (100, 50)
+                        }
+                        params['hidden_layer_sizes'] = layer_map.get(int(params['hidden_layer_sizes']), (50,))
+                    return params
+
+                # Manual optimization for MLP
+                best_score = float('-inf')
+                best_params = {}
+                best_model = None  # Initialize best_model
+
+                for _ in range(n_iter):
+                    # Sample parameters randomly from the space
+                    params = {}
+                    for param, space in search_space.items():
+                        if hasattr(space, 'rvs'):  # It's a distribution
+                            params[param] = space.rvs(1)[0]
+                        elif isinstance(space, list):  # It's a list of values
+                            params[param] = np.random.choice(space)
+
+                    # Map parameters for hidden layer sizes
+                    params = map_hidden_layers(params)
+
+                    # Create and fit model with these parameters
+                    try:
+                        model = model_class(**params)
+                        model.fit(X_train, y_train)
+                        # Score model
+                        score = -mean_squared_error(y_train, model.predict(X_train))  # Neg MSE
+                        if score > best_score:
+                            best_score = score
+                            best_params = params
+                            best_model = model
+                    except Exception as e:
+                        print(f"  Skipping parameters due to error: {e}")
+                        continue
+
+                print(f"  Best params: {best_params}")
+                if best_model is None:
+                    # Fallback if no model was successfully trained
+                    print("  No successful model training, using default parameters")
+                    best_model = model_class(random_state=42, max_iter=1000) 
+                    best_model.fit(X_train, y_train)
+                return best_model, best_params
+            else:
+                # For other models, use standard BayesSearchCV
+                search = BayesSearchCV(
+                    model_instance, search_space, n_iter=n_iter, cv=cv,
+                    scoring='neg_mean_squared_error', verbose=1, random_state=42, n_jobs=-1
+                )
+                search.fit(X_train, y_train)
             best_model = search.best_estimator_
             best_params = search.best_params_
         else:
@@ -603,17 +717,24 @@ def build_and_evaluate_models(X_train, y_train, X_test, y_test):
 
     # Define models to evaluate
     models = {}
-    param_grids = {}
+    param_grids = {}  # For grid/random search
+    param_ranges = {}  # For Bayesian optimization
 
     # Linear models
     if MODELS_TO_EVALUATE.get('Linear Regression', False):
         models['Linear Regression'] = LinearRegression()
         param_grids['Linear Regression'] = {'fit_intercept': [True, False]}
+        param_ranges['Linear Regression'] = {'fit_intercept': [True, False]}
 
     if MODELS_TO_EVALUATE.get('Ridge', False):
         models['Ridge'] = Ridge()
         param_grids['Ridge'] = {
             'alpha': [0.001, 0.01, 0.1, 1.0, 10.0, 100.0],
+            'fit_intercept': [True, False],
+            'solver': ['auto', 'svd', 'cholesky', 'lsqr', 'sparse_cg', 'sag', 'saga']
+        }
+        param_ranges['Ridge'] = {
+            'alpha': (0.001, 100.0, 'log-uniform'),
             'fit_intercept': [True, False],
             'solver': ['auto', 'svd', 'cholesky', 'lsqr', 'sparse_cg', 'sag', 'saga']
         }
@@ -625,6 +746,11 @@ def build_and_evaluate_models(X_train, y_train, X_test, y_test):
             'fit_intercept': [True, False],
             'max_iter': [1000, 3000, 5000]
         }
+        param_ranges['Lasso'] = {
+            'alpha': (0.0001, 10.0, 'log-uniform'),
+            'fit_intercept': [True, False],
+            'max_iter': (1000, 10000)
+        }
 
     if MODELS_TO_EVALUATE.get('ElasticNet', False):
         models['ElasticNet'] = ElasticNet()
@@ -633,6 +759,12 @@ def build_and_evaluate_models(X_train, y_train, X_test, y_test):
             'l1_ratio': [0.1, 0.3, 0.5, 0.7, 0.9],
             'fit_intercept': [True, False],
             'max_iter': [1000, 3000, 5000]
+        }
+        param_ranges['ElasticNet'] = {
+            'alpha': (0.0001, 1.0, 'log-uniform'),
+            'l1_ratio': (0.1, 0.9),
+            'fit_intercept': [True, False],
+            'max_iter': (1000, 10000)
         }
 
     # Tree-based models
@@ -643,6 +775,11 @@ def build_and_evaluate_models(X_train, y_train, X_test, y_test):
             'min_samples_split': [2, 5, 10],
             'min_samples_leaf': [1, 2, 4]
         }
+        param_ranges['Decision Tree'] = {
+            'max_depth': (3, 30),  # None will be handled specially
+            'min_samples_split': (2, 20),
+            'min_samples_leaf': (1, 10)
+        }
 
     if MODELS_TO_EVALUATE.get('Random Forest', False):
         models['Random Forest'] = RandomForestRegressor()
@@ -651,6 +788,12 @@ def build_and_evaluate_models(X_train, y_train, X_test, y_test):
             'max_depth': [None, 10, 20, 30],
             'min_samples_split': [2, 5, 10],
             'min_samples_leaf': [1, 2, 4]
+        }
+        param_ranges['Random Forest'] = {
+            'n_estimators': (10, 300),
+            'max_depth': (3, 50),  # None will be handled specially
+            'min_samples_split': (2, 20),
+            'min_samples_leaf': (1, 10)
         }
 
     if MODELS_TO_EVALUATE.get('Gradient Boosting', False):
@@ -661,6 +804,12 @@ def build_and_evaluate_models(X_train, y_train, X_test, y_test):
             'max_depth': [3, 5, 7, 9],
             'min_samples_split': [2, 5, 10]
         }
+        param_ranges['Gradient Boosting'] = {
+            'n_estimators': (10, 300),
+            'learning_rate': (0.001, 0.3, 'log-uniform'),
+            'max_depth': (2, 15),
+            'min_samples_split': (2, 20)
+        }
 
     if MODELS_TO_EVALUATE.get('XGBoost', False):
         models['XGBoost'] = xgb.XGBRegressor()
@@ -670,6 +819,13 @@ def build_and_evaluate_models(X_train, y_train, X_test, y_test):
             'max_depth': [3, 5, 7, 9],
             'subsample': [0.8, 0.9, 1.0],
             'colsample_bytree': [0.8, 0.9, 1.0]
+        }
+        param_ranges['XGBoost'] = {
+            'n_estimators': (10, 300),
+            'learning_rate': (0.001, 0.3, 'log-uniform'),
+            'max_depth': (2, 15),
+            'subsample': (0.5, 1.0),
+            'colsample_bytree': (0.5, 1.0)
         }
 
     if MODELS_TO_EVALUATE.get('LightGBM', False):
@@ -690,6 +846,11 @@ def build_and_evaluate_models(X_train, y_train, X_test, y_test):
             'C': [0.1, 1, 10, 100],
             'gamma': ['scale', 'auto', 0.1, 0.01, 0.001]
         }
+        param_ranges['SVR'] = {
+            'kernel': ['linear', 'poly', 'rbf', 'sigmoid'],
+            'C': (0.01, 1000.0, 'log-uniform'),
+            'gamma': ['scale', 'auto'] + [(0.0001, 1.0, 'log-uniform')]
+        }
 
     if MODELS_TO_EVALUATE.get('KNN', False):
         models['KNN'] = KNeighborsRegressor()
@@ -698,10 +859,17 @@ def build_and_evaluate_models(X_train, y_train, X_test, y_test):
             'weights': ['uniform', 'distance'],
             'algorithm': ['auto', 'ball_tree', 'kd_tree', 'brute']
         }
+        param_ranges['KNN'] = {
+            'n_neighbors': (1, 30),
+            'weights': ['uniform', 'distance'],
+            'algorithm': ['auto', 'ball_tree', 'kd_tree', 'brute']
+        }
         
     # Neural Network model
     if MODELS_TO_EVALUATE.get('MLP', False):
         models['MLP'] = MLPRegressor(random_state=42, max_iter=1000)
+
+        # For grid or random search
         param_grids['MLP'] = {
             'hidden_layer_sizes': [(50,), (100,), (50, 50), (100, 50)],
             'activation': ['relu', 'tanh'],
@@ -710,19 +878,37 @@ def build_and_evaluate_models(X_train, y_train, X_test, y_test):
             'learning_rate': ['constant', 'adaptive']
         }
         
+        # For Bayesian optimization
+        param_ranges['MLP'] = {
+            'hidden_layer_sizes': [1, 2, 3, 4],  # Will map to actual tuples later
+            'activation': ['relu', 'tanh'],
+            'solver': ['adam', 'sgd'],
+            'alpha': (0.00001, 0.1, 'log-uniform'),
+            'learning_rate': ['constant', 'adaptive']
+        }
+        
     # Gaussian Process Regression
     if MODELS_TO_EVALUATE.get('GPR', False):
-        # Define kernels to try
+        models['GPR'] = GaussianProcessRegressor(random_state=42)
+        
+        # For grid or random search
         kernel_rbf = C(1.0, (1e-3, 1e3)) * RBF(1.0, (1e-2, 1e2))
         kernel_matern = C(1.0, (1e-3, 1e3)) * Matern(1.0, (1e-2, 1e2), nu=1.5)
         kernel_rbf_white = C(1.0, (1e-3, 1e3)) * RBF(1.0, (1e-2, 1e2)) + WhiteKernel(0.1)
         
-        models['GPR'] = GaussianProcessRegressor(random_state=42)
         param_grids['GPR'] = {
             'kernel': [kernel_rbf, kernel_matern, kernel_rbf_white],
             'alpha': [1e-10, 1e-8, 1e-6],
             'normalize_y': [True, False],
             'n_restarts_optimizer': [0, 1, 3]
+        }
+        
+        # For Bayesian optimization
+        param_ranges['GPR'] = {
+            'kernel': [1, 2, 3],  # Will map to actual kernels later
+            'alpha': (1e-12, 1e-4, 'log-uniform'),
+            'normalize_y': [True, False],
+            'n_restarts_optimizer': (0, 5)
         }
 
     # Train and evaluate models
@@ -739,10 +925,18 @@ def build_and_evaluate_models(X_train, y_train, X_test, y_test):
             # Tune hyperparameters if grid is provided
             if name in param_grids and len(param_grids[name]) > 0:
                 model_class = model.__class__
+                
+                # Select parameter grid based on tuning method
+                if TUNING_METHOD == 'bayesian' and name in param_ranges:
+                    param_config = param_ranges[name]
+                else:
+                    param_config = param_grids[name]
+                    
                 tuned_model, best_params = tune_hyperparameters(
-                    model_class, param_grids[name],
+                    model_class, param_config,
                     X_train_scaled, y_train,
-                    method=TUNING_METHOD, cv=CV_FOLDS, n_iter=N_ITER
+                    method=TUNING_METHOD, cv=CV_FOLDS, n_iter=N_ITER,
+                    model_name=name
                 )
                 print(f"  Best params: {best_params}")
                 all_models[name] = tuned_model
