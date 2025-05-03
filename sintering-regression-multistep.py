@@ -71,7 +71,6 @@ MODELS_TO_EVALUATE = {
     'Random Forest': True, 
     'Gradient Boosting': True,
     'XGBoost': True,
-    'LightGBM': True,  # Optional, can be skipped for speed
     'SVR': True,       # More time-consuming
     'KNN': True,       # Simple but not as effective for this problem
     'MLP': True,       # Time-consuming to train
