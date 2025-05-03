@@ -12,6 +12,10 @@ from sklearn.tree import DecisionTreeRegressor
 from sklearn.neighbors import KNeighborsRegressor
 from sklearn.base import clone
 import xgboost as xgb
+import lightgbm as lgb
+from sklearn.neural_network import MLPRegressor
+from sklearn.gaussian_process import GaussianProcessRegressor
+from sklearn.gaussian_process.kernels import RBF, Matern, WhiteKernel, ConstantKernel as C
 import warnings
 import time
 
@@ -61,13 +65,21 @@ SELECTED_FEATURES = [
 MODELS_TO_EVALUATE = {
     'Linear Regression': True,
     'Ridge': True,
+    'Lasso': True,
+    'ElasticNet': True,
+    'Decision Tree': True,  # More basic model, can be skipped for speed
     'Random Forest': True, 
     'Gradient Boosting': True,
-    'XGBoost': True
+    'XGBoost': True,
+    'LightGBM': True,  # Optional, can be skipped for speed
+    'SVR': True,       # More time-consuming
+    'KNN': True,       # Simple but not as effective for this problem
+    'MLP': True,       # Time-consuming to train
+    'GPR': True        # Very time-consuming for large datasets
 }
 
 # Hyperparameter tuning settings
-TUNING_METHOD = 'random'  # 'grid', 'random', 'bayesian'
+TUNING_METHOD = 'bayesian'  # 'grid', 'random', 'bayesian'
 CV_FOLDS = 3  # Reduced from 5 for faster training
 N_ITER = 10  # Reduced from 20 for faster training
 USE_OPTIMIZED_MODELS = True  # Whether to use hyperparameter-optimized models
@@ -423,6 +435,18 @@ def create_base_models(X_train, y_train, use_optimized=True):
         else:
             models['ElasticNet'] = ElasticNet(alpha=0.01, l1_ratio=0.5)
     
+    if MODELS_TO_EVALUATE.get('Decision Tree', False):
+        if use_optimized:
+            print("Tuning Decision Tree...")
+            model_class = DecisionTreeRegressor
+            param_config = param_ranges['Decision Tree'] if TUNING_METHOD == 'bayesian' else param_grids['Decision Tree']
+            model, _ = tune_hyperparameters(model_class, param_config, X_train, y_train,
+                                           method=TUNING_METHOD, cv=CV_FOLDS, n_iter=N_ITER,
+                                           model_name='Decision Tree')
+            models['Decision Tree'] = model
+        else:
+            models['Decision Tree'] = DecisionTreeRegressor(random_state=42)
+    
     if MODELS_TO_EVALUATE.get('Random Forest', False):
         if use_optimized:
             print("Tuning Random Forest...")
@@ -459,6 +483,18 @@ def create_base_models(X_train, y_train, use_optimized=True):
         else:
             models['XGBoost'] = xgb.XGBRegressor(n_estimators=100, random_state=42)
     
+    if MODELS_TO_EVALUATE.get('LightGBM', False):
+        if use_optimized:
+            print("Tuning LightGBM...")
+            model_class = lgb.LGBMRegressor
+            param_config = param_ranges['LightGBM'] if TUNING_METHOD == 'bayesian' else param_grids['LightGBM']
+            model, _ = tune_hyperparameters(model_class, param_config, X_train, y_train,
+                                           method=TUNING_METHOD, cv=CV_FOLDS, n_iter=N_ITER,
+                                           model_name='LightGBM')
+            models['LightGBM'] = model
+        else:
+            models['LightGBM'] = lgb.LGBMRegressor(n_estimators=100, random_state=42)
+    
     if MODELS_TO_EVALUATE.get('SVR', False):
         if use_optimized:
             print("Tuning SVR...")
@@ -482,6 +518,31 @@ def create_base_models(X_train, y_train, use_optimized=True):
             models['KNN'] = model
         else:
             models['KNN'] = KNeighborsRegressor(n_neighbors=5)
+    
+    if MODELS_TO_EVALUATE.get('MLP', False):
+        if use_optimized:
+            print("Tuning MLP...")
+            model_class = MLPRegressor
+            param_config = param_ranges['MLP'] if TUNING_METHOD == 'bayesian' else param_grids['MLP']
+            model, _ = tune_hyperparameters(model_class, param_config, X_train, y_train,
+                                           method=TUNING_METHOD, cv=CV_FOLDS, n_iter=N_ITER,
+                                           model_name='MLP')
+            models['MLP'] = model
+        else:
+            models['MLP'] = MLPRegressor(random_state=42, max_iter=1000)
+    
+    if MODELS_TO_EVALUATE.get('GPR', False):
+        if use_optimized:
+            print("Tuning GPR...")
+            model_class = GaussianProcessRegressor
+            param_config = param_ranges['GPR'] if TUNING_METHOD == 'bayesian' else param_grids['GPR']
+            model, _ = tune_hyperparameters(model_class, param_config, X_train, y_train,
+                                           method=TUNING_METHOD, cv=CV_FOLDS, n_iter=N_ITER,
+                                           model_name='GPR')
+            models['GPR'] = model
+        else:
+            kernel = C(1.0) * RBF(1.0)
+            models['GPR'] = GaussianProcessRegressor(kernel=kernel, random_state=42)
     
     return models
 
