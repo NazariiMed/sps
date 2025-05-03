@@ -15,6 +15,9 @@ import xgboost as xgb
 import warnings
 import time
 
+# Import tuning functionality from shared module
+from sintering_tuning import tune_hyperparameters, get_param_grids, ensure_finite
+
 # Try to import tqdm for progress bars, but continue if not available
 try:
     from tqdm import tqdm
@@ -27,40 +30,7 @@ except ImportError:
         return iterable
 
 
-def ensure_finite(X, default_value=0.0):
-    """
-    Replace any NaN, inf, or extremely large values with a default value.
-    
-    Args:
-        X: Input array or matrix
-        default_value: Value to use for replacement
-        
-    Returns:
-        X_clean: Cleaned array with finite values
-    """
-    # Make a copy to avoid modifying the original
-    X_clean = np.array(X, copy=True)
-    
-    # Replace inf values
-    mask_inf = np.isinf(X_clean)
-    if np.any(mask_inf):
-        print(f"Warning: Found {np.sum(mask_inf)} infinite values. Replacing with {default_value}.")
-        X_clean[mask_inf] = default_value
-    
-    # Replace NaN values
-    mask_nan = np.isnan(X_clean)
-    if np.any(mask_nan):
-        print(f"Warning: Found {np.sum(mask_nan)} NaN values. Replacing with {default_value}.")
-        X_clean[mask_nan] = default_value
-    
-    # Check for extremely large values
-    large_threshold = 1e6  # Adjust as needed
-    mask_large = np.abs(X_clean) > large_threshold
-    if np.any(mask_large):
-        print(f"Warning: Found {np.sum(mask_large)} extremely large values. Replacing with {default_value}.")
-        X_clean[mask_large] = default_value
-        
-    return X_clean
+# ensure_finite function is now imported from sintering_tuning.py
 
 warnings.filterwarnings('ignore')
 
@@ -95,6 +65,12 @@ MODELS_TO_EVALUATE = {
     'Gradient Boosting': True,
     'XGBoost': True
 }
+
+# Hyperparameter tuning settings
+TUNING_METHOD = 'random'  # 'grid', 'random', 'bayesian'
+CV_FOLDS = 3  # Reduced from 5 for faster training
+N_ITER = 10  # Reduced from 20 for faster training
+USE_OPTIMIZED_MODELS = True  # Whether to use hyperparameter-optimized models
 
 # Multi-step training parameters
 WINDOW_SIZE = 1
@@ -378,6 +354,136 @@ def virtual_experiment_predict(model, X_input, y_prev_actual, n_features_per_win
             prediction = 0.0
     
     return prediction
+
+
+def create_base_models(X_train, y_train, use_optimized=True):
+    """
+    Create base models for training with optional hyperparameter optimization.
+    
+    Args:
+        X_train: Training feature matrix
+        y_train: Training target vector
+        use_optimized: Whether to optimize hyperparameters
+    
+    Returns:
+        models: Dictionary of model instances
+    """
+    models = {}
+    
+    # Get parameter grids for tuning
+    param_grids, param_ranges = get_param_grids()
+    
+    # Create and potentially tune models
+    if MODELS_TO_EVALUATE.get('Linear Regression', False):
+        if use_optimized:
+            print("Tuning Linear Regression...")
+            model_class = LinearRegression
+            # Select parameter grid based on tuning method
+            param_config = param_ranges['Linear Regression'] if TUNING_METHOD == 'bayesian' else param_grids['Linear Regression']
+            model, _ = tune_hyperparameters(model_class, param_config, X_train, y_train,
+                                           method=TUNING_METHOD, cv=CV_FOLDS, n_iter=N_ITER,
+                                           model_name='Linear Regression')
+            models['Linear Regression'] = model
+        else:
+            models['Linear Regression'] = LinearRegression()
+    
+    if MODELS_TO_EVALUATE.get('Ridge', False):
+        if use_optimized:
+            print("Tuning Ridge...")
+            model_class = Ridge
+            param_config = param_ranges['Ridge'] if TUNING_METHOD == 'bayesian' else param_grids['Ridge']
+            model, _ = tune_hyperparameters(model_class, param_config, X_train, y_train,
+                                           method=TUNING_METHOD, cv=CV_FOLDS, n_iter=N_ITER,
+                                           model_name='Ridge')
+            models['Ridge'] = model
+        else:
+            models['Ridge'] = Ridge(alpha=1.0)
+    
+    if MODELS_TO_EVALUATE.get('Lasso', False):
+        if use_optimized:
+            print("Tuning Lasso...")
+            model_class = Lasso
+            param_config = param_ranges['Lasso'] if TUNING_METHOD == 'bayesian' else param_grids['Lasso']
+            model, _ = tune_hyperparameters(model_class, param_config, X_train, y_train,
+                                           method=TUNING_METHOD, cv=CV_FOLDS, n_iter=N_ITER,
+                                           model_name='Lasso')
+            models['Lasso'] = model
+        else:
+            models['Lasso'] = Lasso(alpha=0.01)
+    
+    if MODELS_TO_EVALUATE.get('ElasticNet', False):
+        if use_optimized:
+            print("Tuning ElasticNet...")
+            model_class = ElasticNet
+            param_config = param_ranges['ElasticNet'] if TUNING_METHOD == 'bayesian' else param_grids['ElasticNet']
+            model, _ = tune_hyperparameters(model_class, param_config, X_train, y_train,
+                                           method=TUNING_METHOD, cv=CV_FOLDS, n_iter=N_ITER,
+                                           model_name='ElasticNet')
+            models['ElasticNet'] = model
+        else:
+            models['ElasticNet'] = ElasticNet(alpha=0.01, l1_ratio=0.5)
+    
+    if MODELS_TO_EVALUATE.get('Random Forest', False):
+        if use_optimized:
+            print("Tuning Random Forest...")
+            model_class = RandomForestRegressor
+            param_config = param_ranges['Random Forest'] if TUNING_METHOD == 'bayesian' else param_grids['Random Forest']
+            model, _ = tune_hyperparameters(model_class, param_config, X_train, y_train,
+                                           method=TUNING_METHOD, cv=CV_FOLDS, n_iter=N_ITER,
+                                           model_name='Random Forest')
+            models['Random Forest'] = model
+        else:
+            models['Random Forest'] = RandomForestRegressor(n_estimators=100, random_state=42)
+    
+    if MODELS_TO_EVALUATE.get('Gradient Boosting', False):
+        if use_optimized:
+            print("Tuning Gradient Boosting...")
+            model_class = GradientBoostingRegressor
+            param_config = param_ranges['Gradient Boosting'] if TUNING_METHOD == 'bayesian' else param_grids['Gradient Boosting']
+            model, _ = tune_hyperparameters(model_class, param_config, X_train, y_train,
+                                           method=TUNING_METHOD, cv=CV_FOLDS, n_iter=N_ITER,
+                                           model_name='Gradient Boosting')
+            models['Gradient Boosting'] = model
+        else:
+            models['Gradient Boosting'] = GradientBoostingRegressor(n_estimators=100, random_state=42)
+    
+    if MODELS_TO_EVALUATE.get('XGBoost', False):
+        if use_optimized:
+            print("Tuning XGBoost...")
+            model_class = xgb.XGBRegressor
+            param_config = param_ranges['XGBoost'] if TUNING_METHOD == 'bayesian' else param_grids['XGBoost']
+            model, _ = tune_hyperparameters(model_class, param_config, X_train, y_train,
+                                           method=TUNING_METHOD, cv=CV_FOLDS, n_iter=N_ITER,
+                                           model_name='XGBoost')
+            models['XGBoost'] = model
+        else:
+            models['XGBoost'] = xgb.XGBRegressor(n_estimators=100, random_state=42)
+    
+    if MODELS_TO_EVALUATE.get('SVR', False):
+        if use_optimized:
+            print("Tuning SVR...")
+            model_class = SVR
+            param_config = param_ranges['SVR'] if TUNING_METHOD == 'bayesian' else param_grids['SVR']
+            model, _ = tune_hyperparameters(model_class, param_config, X_train, y_train,
+                                           method=TUNING_METHOD, cv=CV_FOLDS, n_iter=N_ITER,
+                                           model_name='SVR')
+            models['SVR'] = model
+        else:
+            models['SVR'] = SVR(kernel='rbf', C=10)
+    
+    if MODELS_TO_EVALUATE.get('KNN', False):
+        if use_optimized:
+            print("Tuning KNN...")
+            model_class = KNeighborsRegressor
+            param_config = param_ranges['KNN'] if TUNING_METHOD == 'bayesian' else param_grids['KNN']
+            model, _ = tune_hyperparameters(model_class, param_config, X_train, y_train,
+                                           method=TUNING_METHOD, cv=CV_FOLDS, n_iter=N_ITER,
+                                           model_name='KNN')
+            models['KNN'] = model
+        else:
+            models['KNN'] = KNeighborsRegressor(n_neighbors=5)
+    
+    return models
 
 
 def multi_step_train(model, X_train, y_train, X_val, y_val, n_features_per_window, window_size, 
@@ -955,45 +1061,6 @@ def plot_model_comparison(standard_metrics, multistep_metrics, approach="Virtual
     plt.close()
 
 
-def create_base_models():
-    """
-    Create base models for training.
-    
-    Returns:
-        models: Dictionary of model instances
-    """
-    models = {}
-    
-    if MODELS_TO_EVALUATE.get('Linear Regression', False):
-        models['Linear Regression'] = LinearRegression()
-    
-    if MODELS_TO_EVALUATE.get('Ridge', False):
-        models['Ridge'] = Ridge(alpha=1.0)
-    
-    if MODELS_TO_EVALUATE.get('Lasso', False):
-        models['Lasso'] = Lasso(alpha=0.01)
-    
-    if MODELS_TO_EVALUATE.get('ElasticNet', False):
-        models['ElasticNet'] = ElasticNet(alpha=0.01, l1_ratio=0.5)
-    
-    if MODELS_TO_EVALUATE.get('Random Forest', False):
-        models['Random Forest'] = RandomForestRegressor(n_estimators=100, random_state=42)
-    
-    if MODELS_TO_EVALUATE.get('Gradient Boosting', False):
-        models['Gradient Boosting'] = GradientBoostingRegressor(n_estimators=100, random_state=42)
-    
-    if MODELS_TO_EVALUATE.get('XGBoost', False):
-        models['XGBoost'] = xgb.XGBRegressor(n_estimators=100, random_state=42)
-    
-    if MODELS_TO_EVALUATE.get('SVR', False):
-        models['SVR'] = SVR(kernel='rbf', C=10)
-    
-    if MODELS_TO_EVALUATE.get('KNN', False):
-        models['KNN'] = KNeighborsRegressor(n_neighbors=5)
-    
-    return models
-
-
 def main():
     """Main execution function"""
     start_time = time.time()
@@ -1034,13 +1101,18 @@ def main():
     
     # Train models with standard approach first
     print("\nTraining models with standard approach...")
-    base_models = create_base_models()
+    
+    model_status = "optimized" if USE_OPTIMIZED_MODELS else "default"
+    print(f"Using {model_status} hyperparameters")
+    
+    base_models = create_base_models(X_train_scaled, y_train_split, USE_OPTIMIZED_MODELS)
     standard_models = {}
     standard_metrics = {}
     
     for name, model in base_models.items():
         print(f"\nTraining {name}...")
-        model.fit(X_train_scaled, y_train_split)
+        if not USE_OPTIMIZED_MODELS:  # If we're using default models, we need to fit them here
+            model.fit(X_train_scaled, y_train_split)
         
         # Evaluate on test set
         test_metrics, _ = evaluate_model(model, X_test_scaled, y_test, name)
@@ -1068,7 +1140,7 @@ def main():
         # Plot results
         plot_time_series_prediction(
             y_virtual_true, y_virtual_pred, name, 
-            title=f"Virtual Experiment - {name} (Standard Training)"
+            title=f"Virtual Experiment - {name} (Standard {model_status} Training)"
         )
     
     # Train models with multi-step approach
@@ -1085,7 +1157,8 @@ def main():
         model_to_train = clone(base_model)
         
         # First fit with standard approach to have a starting point
-        model_to_train.fit(X_train_scaled, y_train_split)
+        if not USE_OPTIMIZED_MODELS:  # Only need to refit if we're using default models
+            model_to_train.fit(X_train_scaled, y_train_split)
         
         # Then apply multi-step training
         trained_model, history = multi_step_train(
@@ -1124,7 +1197,7 @@ def main():
         
         plot_time_series_prediction(
             y_ms_virtual_true, y_ms_virtual_pred, name, 
-            title=f"Virtual Experiment - {name} (Multi-step Training)"
+            title=f"Virtual Experiment - {name} (Multi-step {model_status} Training)"
         )
         
         # Compare standard vs multi-step for this model
@@ -1144,7 +1217,7 @@ def main():
             
             plt.xlabel('Time Step')
             plt.ylabel('Rel. Piston Trav')
-            plt.title(f'Standard vs Multi-step Training Comparison - {name}')
+            plt.title(f'Standard vs Multi-step Training Comparison - {name} ({model_status})')
             plt.legend()
             plt.grid(True, alpha=0.3)
             plt.tight_layout()
@@ -1165,17 +1238,35 @@ def main():
         r2_improvement = ((ms_r2 - std_r2) / abs(std_r2)) * 100 if std_r2 != 0 else 0
         
         print("\nOverall Improvement:")
-        print(f"  Standard Training  - Average RMSE: {std_rmse:.4f}, Average R²: {std_r2:.4f}")
-        print(f"  Multi-step Training - Average RMSE: {ms_rmse:.4f}, Average R²: {ms_r2:.4f}")
+        print(f"  Standard Training ({model_status})  - Average RMSE: {std_rmse:.4f}, Average R²: {std_r2:.4f}")
+        print(f"  Multi-step Training ({model_status}) - Average RMSE: {ms_rmse:.4f}, Average R²: {ms_r2:.4f}")
         print(f"  RMSE Improvement: {rmse_improvement:.2f}%")
         print(f"  R² Improvement: {r2_improvement:.2f}%")
     else:
         print("\nNot enough data to calculate improvement metrics.")
     
-    # Improvement metrics are now printed in the block above
+    # Save summary of results to file
+    summary_file = os.path.join(results_dir, f"summary_{model_status}.txt")
+    with open(summary_file, 'w') as f:
+        f.write(f"SPS Sintering Multi-step Regression Analysis Summary ({model_status} models)\n\n")
+        f.write(f"Standard Training Results:\n")
+        for name, metrics in standard_metrics.items():
+            f.write(f"  {name}: RMSE={metrics['rmse']:.4f}, R²={metrics['r2']:.4f}\n")
+        
+        f.write(f"\nMulti-step Training Results:\n")
+        for name, metrics in multistep_metrics.items():
+            f.write(f"  {name}: RMSE={metrics['rmse']:.4f}, R²={metrics['r2']:.4f}\n")
+            
+        if standard_metrics and multistep_metrics:
+            f.write(f"\nOverall Improvement:\n")
+            f.write(f"  Standard Training  - Average RMSE: {std_rmse:.4f}, Average R²: {std_r2:.4f}\n")
+            f.write(f"  Multi-step Training - Average RMSE: {ms_rmse:.4f}, Average R²: {ms_r2:.4f}\n")
+            f.write(f"  RMSE Improvement: {rmse_improvement:.2f}%\n")
+            f.write(f"  R² Improvement: {r2_improvement:.2f}%\n")
     
     elapsed_time = time.time() - start_time
     print(f"\nTotal execution time: {elapsed_time/60:.2f} minutes")
+    print(f"\nResults saved to {summary_file}")
     print("\nAnalysis complete!")
 
 
