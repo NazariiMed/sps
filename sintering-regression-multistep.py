@@ -74,11 +74,11 @@ MODELS_TO_EVALUATE = {
     'SVR': True,       # More time-consuming
     'KNN': True,       # Simple but not as effective for this problem
     'MLP': True,       # Time-consuming to train
-    'GPR': True        # Very time-consuming for large datasets
+    'GPR': False        # Very time-consuming for large datasets
 }
 
 # Hyperparameter tuning settings
-TUNING_METHOD = 'bayesian'  # 'grid', 'random', 'bayesian'
+TUNING_METHOD = 'random'  # 'grid', 'random', 'bayesian'
 CV_FOLDS = 3  # Reduced from 5 for faster training
 N_ITER = 10  # Reduced from 20 for faster training
 USE_OPTIMIZED_MODELS = True  # Whether to use hyperparameter-optimized models
