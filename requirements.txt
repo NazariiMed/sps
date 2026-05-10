@@ -7,3 +7,5 @@ lightgbm~=4.6.0
 scikit-learn~=1.6.1
 scikit-optimize~=0.10.2
 tqdm
+scipy
+joblib

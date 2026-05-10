@@ -15,21 +15,28 @@ from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import RBF, Matern, WhiteKernel, ConstantKernel as C
 # Import tuning functionality from shared module
 from sintering_tuning import tune_hyperparameters, get_param_grids, ensure_finite
+# Import reporting functionality
+from sintering_reporting import save_model_artifacts, generate_pdf_report
+
 import xgboost as xgb
 import lightgbm as lgb
 import warnings
+import re
+from scipy.signal import savgol_filter  # Import Savitzky-Golay filter
 
 warnings.filterwarnings('ignore')
 
 # Set random seed for reproducibility
 np.random.seed(42)
 
-# Define file paths
+# Define file paths - Added all 6 files
 file_paths = [
-    '160508-1021-1000,0min,56kN.csv',
-    '160508-1022-900,0min,56kN.csv',
-    '200508-1023-1350,0min,56kN.csv',
-    '200508-1024-1200,0min,56kN.csv'
+    'data/160508-1021-1000,0min,56kN.csv',
+    'data/160508-1022-900,0min,56kN.csv',
+    'data/200508-1023-1350,0min,56kN.csv',
+    'data/200508-1024-1200,0min,56kN.csv',
+    'data/050608-1037-1200,0min,70kN.csv',
+    'data/290508-1033-1100,0min,70kN.csv'
 ]
 
 # Configuration for regression approaches
@@ -68,6 +75,21 @@ CV_FOLDS = 5
 N_ITER = 20  # Number of iterations for random/bayesian search
 
 
+def _extract_exp_params_from_filename(filename):
+    """
+    Extracts experimental temperature and force from a filename.
+    Example filename: 'data/160508-1021-1000,0min,56kN.csv'
+    """
+    # Remove path prefix if present (e.g., 'data/')
+    base_filename = filename.split('/')[-1]
+    match = re.search(r'-(\d+),0min,(\d+)kN', base_filename)
+    if match:
+        temp = int(match.group(1))
+        force = int(match.group(2))
+        return temp, force
+    return None, None
+
+
 def load_data(file_paths, validation_index):
     """
     Load and preprocess the CSV files.
@@ -91,6 +113,17 @@ def load_data(file_paths, validation_index):
 
             # Add a file identifier column
             df['file_id'] = i
+            
+            # Ensure target column is numeric immediately after loading
+            if TARGET_COLUMN in df.columns:
+                # Convert to numeric, coercing errors to NaN
+                df[TARGET_COLUMN] = pd.to_numeric(df[TARGET_COLUMN], errors='coerce')
+                
+                # Drop rows where target became NaN
+                original_len = len(df)
+                df = df.dropna(subset=[TARGET_COLUMN])
+                if len(df) < original_len:
+                    print(f"  Dropped {original_len - len(df)} rows with non-numeric target values")
 
             all_data.append(df)
         except Exception as e:
@@ -109,88 +142,170 @@ def load_data(file_paths, validation_index):
     return train_data, validation_data
 
 
-def preprocess_data(df, target_col, excluded_cols, selected_features=None):
+def preprocess_data(df, target_col, excluded_cols, selected_features=None, file_paths_list=None):
     """
-    Preprocess the data for regression.
+    Preprocess the data for regression, including feature engineering.
 
     Args:
         df: Input DataFrame
         target_col: Target column name
         excluded_cols: List of columns to exclude
         selected_features: List of features to include (None = use all)
+        file_paths_list: Original list of file paths to extract experiment parameters
 
     Returns:
         X: Feature matrix
         y: Target vector
         feature_names: List of feature names used
     """
-    # Make a copy to avoid modifying the original
     data = df.copy()
 
-    # Check if target column exists
     if target_col not in data.columns:
         raise ValueError(f"Target column '{target_col}' not found in data. Available columns: {data.columns.tolist()}")
 
     print(f"Preprocessing data with shape: {data.shape}")
     print(f"Target column: {target_col}")
 
-    # Drop rows with NaN in target column
+    # Ensure target is numeric (just in case)
+    data[target_col] = pd.to_numeric(data[target_col], errors='coerce')
+
     original_count = len(data)
     data = data.dropna(subset=[target_col])
     dropped_count = original_count - len(data)
     print(f"Dropped {dropped_count} rows with missing target values")
 
-    # Extract target
+    # --- NEW: Smooth the TARGET variable ---
+    # This forces the model to learn the trend, not the noise
+    print("Smoothing target variable to reduce noise...")
+    sg_window_target = 21  # Slightly larger window for target
+    sg_poly_target = 2
+    
+    # Apply smoothing per file to avoid jumps at file boundaries
+    data[target_col] = data.groupby('file_id')[target_col].transform(
+        lambda x: savgol_filter(x, window_length=sg_window_target, polyorder=sg_poly_target)
+    )
+    
     y = data[target_col].values
 
-    # Convert -999 values to NaN (likely error codes in the dataset)
     data = data.replace(-999, np.nan)
 
-    # Drop specified columns and the target
+    # --- Feature Engineering ---
+    # Work on a copy of selected_features to avoid mutating the global list
+    current_selected = selected_features.copy() if selected_features is not None else None
+
+    # 1. Extract experimental parameters from filenames
+    if file_paths_list:
+        data['exp_temp'] = 0
+        data['exp_force'] = 0
+        for file_id_val in data['file_id'].unique():
+            if file_id_val < len(file_paths_list):
+                original_filename = file_paths_list[file_id_val]
+                temp, force = _extract_exp_params_from_filename(original_filename)
+                if temp is not None and force is not None:
+                    data.loc[data['file_id'] == file_id_val, 'exp_temp'] = temp
+                    data.loc[data['file_id'] == file_id_val, 'exp_force'] = force
+        
+        if current_selected is not None:
+            if 'exp_temp' not in current_selected:
+                current_selected.append('exp_temp')
+            if 'exp_force' not in current_selected:
+                current_selected.append('exp_force')
+
+    # 2. Advanced Feature Engineering with Savitzky-Golay Filter
+    # Parameters for SavGol: window_length (must be odd), polyorder
+    sg_window = 15  # Window size for smoothing (adjust based on data noise)
+    sg_poly = 2     # Polynomial order
+
+    # A. Calculate Shrinkage Rate (Derivative of Piston Travel)
+    # This is physically the most important parameter in sintering
+    data['Shrinkage_Rate'] = data.groupby('file_id')[target_col].transform(
+        lambda x: savgol_filter(x, window_length=sg_window, polyorder=sg_poly, deriv=1)
+    )
+    
+    # B. Calculate Heating Rate (Derivative of Temperature)
+    if 'Pyrometer' in data.columns:
+        # Ensure Pyrometer is numeric
+        data['Pyrometer'] = pd.to_numeric(data['Pyrometer'], errors='coerce').fillna(method='ffill')
+        
+        data['Heating_Rate'] = data.groupby('file_id')['Pyrometer'].transform(
+            lambda x: savgol_filter(x, window_length=sg_window, polyorder=sg_poly, deriv=1)
+        )
+        # Also smooth the raw Pyrometer signal
+        data['Pyrometer_Smooth'] = data.groupby('file_id')['Pyrometer'].transform(
+            lambda x: savgol_filter(x, window_length=sg_window, polyorder=sg_poly, deriv=0)
+        )
+
+    # C. Interaction Terms (Physics-based)
+    # Force * Temperature is proportional to the driving force for creep/plasticity
+    if 'AV Force' in data.columns and 'Pyrometer' in data.columns:
+        # Ensure AV Force is numeric
+        data['AV Force'] = pd.to_numeric(data['AV Force'], errors='coerce').fillna(method='ffill')
+        data['Force_x_Temp'] = data['AV Force'] * data['Pyrometer']
+
+    # D. NEW: Cumulative Energy (Integral of Power)
+    if 'Heating power' in data.columns:
+        data['Heating power'] = pd.to_numeric(data['Heating power'], errors='coerce').fillna(0)
+        # Calculate cumulative sum per file
+        data['Cumulative_Energy'] = data.groupby('file_id')['Heating power'].cumsum()
+        
+        if current_selected is not None:
+            if 'Cumulative_Energy' not in current_selected:
+                current_selected.append('Cumulative_Energy')
+
+    # Add these new features to selected_features
+    if current_selected is not None:
+        # REMOVED 'Shrinkage_Rate' from this list to prevent data leakage!
+        new_features = ['Heating_Rate', 'Pyrometer_Smooth', 'Force_x_Temp']
+        for feat in new_features:
+            if feat in data.columns and feat not in current_selected:
+                current_selected.append(feat)
+
+    # E. Standard Rolling Means (kept for robustness)
+    dynamic_features_to_process = ['MTC1', 'SV Force']
+    window_size_feat = 5
+    for feature in dynamic_features_to_process:
+        if feature in data.columns:
+            # Ensure feature is numeric
+            data[feature] = pd.to_numeric(data[feature], errors='coerce').fillna(method='ffill')
+            
+            data[f'{feature}_rolling_mean_{window_size_feat}'] = data.groupby('file_id')[feature].transform(
+                lambda x: x.rolling(window=window_size_feat, min_periods=1).mean()
+            )
+            if current_selected is not None:
+                if f'{feature}_rolling_mean_{window_size_feat}' not in current_selected:
+                    current_selected.append(f'{feature}_rolling_mean_{window_size_feat}')
+    # --- End Feature Engineering ---
+
     columns_to_drop = excluded_cols + [target_col, 'file_id']
     X_data = data.drop(columns=columns_to_drop, errors='ignore')
 
-    # Select only specified features if provided
-    if selected_features is not None:
-        available_features = [col for col in selected_features if col in X_data.columns]
-        missing_features = [col for col in selected_features if col not in X_data.columns]
+    if current_selected is not None:
+        available_features = [col for col in current_selected if col in X_data.columns]
+        missing_features = [col for col in current_selected if col not in X_data.columns]
         if missing_features:
             print(f"Warning: Some selected features are not in the data: {missing_features}")
         X_data = X_data[available_features]
 
     print(f"Selected features: {X_data.columns.tolist()}")
 
-    # Check for non-numeric columns
     non_numeric = X_data.select_dtypes(exclude=[np.number]).columns.tolist()
     if non_numeric:
         print(f"Warning: Non-numeric columns found: {non_numeric}")
         print("Converting to numeric or dropping...")
-
         for col in non_numeric:
             try:
-                # Try to convert to numeric
                 X_data[col] = pd.to_numeric(X_data[col], errors='coerce')
             except:
-                # If conversion fails, drop the column
                 print(f"  Dropping column: {col}")
                 X_data = X_data.drop(columns=[col])
 
-    # Check for NaN values
     nan_count = X_data.isna().sum().sum()
     if nan_count > 0:
         print(f"Found {nan_count} NaN values in features. Filling with column means...")
-
-    # Fill remaining NaNs with column means
     X_data = X_data.fillna(X_data.mean())
 
-    # Get feature names for later use
     feature_names = X_data.columns.tolist()
-
-    # Convert to numpy array for modeling
     X = X_data.values
-
-    # Improve precision of target variable (if needed)
-    # This doesn't change the actual precision but makes sure we're using float64
     y = y.astype(np.float64)
 
     print(f"Preprocessed data: X shape: {X.shape}, y shape: {y.shape}")
@@ -319,6 +434,13 @@ def analyze_target_precision(df, target_col, plot=True):
         dict: Dictionary with precision analysis results
     """
     print(f"\nAnalyzing precision issues in '{target_col}'...")
+
+    # Ensure target column is numeric
+    if df[target_col].dtype == object:
+        print(f"  Warning: Target column '{target_col}' is object type. Converting to numeric...")
+        df[target_col] = pd.to_numeric(df[target_col], errors='coerce')
+        # Drop NaNs that might have been created
+        df = df.dropna(subset=[target_col])
 
     # Extract target column
     target_values = df[target_col].values
@@ -920,7 +1042,7 @@ def plot_smoothing_comparison(y_true, y_pred_orig, y_pred_medium, y_pred_high, m
                     plateaus[-1] = (plateaus[-1][0], i)  # Extend the last plateau
         else:
             consecutive_same = 0
-        last_val = val
+        last_val = y_pred_orig[i]
     
     # Plot 2: Zoom in on a problematic region with plateaus
     if plateaus:
@@ -1057,9 +1179,9 @@ def main():
     if APPROACH == 1:
         # Standard approach: predict target based on current features only
         X_train, y_train, feature_names = preprocess_data(
-            train_data, TARGET_COLUMN, EXCLUDED_COLUMNS, SELECTED_FEATURES)
+            train_data, TARGET_COLUMN, EXCLUDED_COLUMNS, SELECTED_FEATURES, file_paths_list=file_paths)
         X_val, y_val, _ = preprocess_data(
-            validation_data, TARGET_COLUMN, EXCLUDED_COLUMNS, SELECTED_FEATURES)
+            validation_data, TARGET_COLUMN, EXCLUDED_COLUMNS, SELECTED_FEATURES, file_paths_list=file_paths)
 
         # Split training data into train and test sets
         X_train_split, X_test, y_train_split, y_test = train_test_split(
@@ -1118,9 +1240,9 @@ def main():
         # Window approach: use previous step data and target to predict next step
         # First preprocess the data without windowing
         X_train, y_train, feature_names = preprocess_data(
-            train_data, TARGET_COLUMN, EXCLUDED_COLUMNS, SELECTED_FEATURES)
+            train_data, TARGET_COLUMN, EXCLUDED_COLUMNS, SELECTED_FEATURES, file_paths_list=file_paths)
         X_val, y_val, _ = preprocess_data(
-            validation_data, TARGET_COLUMN, EXCLUDED_COLUMNS, SELECTED_FEATURES)
+            validation_data, TARGET_COLUMN, EXCLUDED_COLUMNS, SELECTED_FEATURES, file_paths_list=file_paths)
 
         # Create windowed data (include one previous step)
         window_size = 1
@@ -1129,9 +1251,11 @@ def main():
 
         # Create feature names for windowed data
         window_feature_names = []
+        base_feature_names = feature_names
+
         for w in range(window_size + 1):
             prefix = "" if w == 0 else f"prev{w}_"
-            window_feature_names.extend([f"{prefix}{name}" for name in feature_names])
+            window_feature_names.extend([f"{prefix}{name}" for name in base_feature_names])
         for w in range(1, window_size + 1):
             window_feature_names.append(f"prev{w}_{TARGET_COLUMN}")
 
@@ -1187,6 +1311,12 @@ def main():
             
         # Plot comparison of all models
         plot_model_comparison(y_val_window, all_predictions, APPROACH)
+        
+        # --- NEW: Save Model and Generate Report ---
+        print("\nSaving model artifacts and generating report...")
+        save_model_artifacts(best_model, scaler, window_feature_names)
+        generate_pdf_report(y_val_window, all_predictions, results, window_feature_names, best_model)
+        # -------------------------------------------
 
     elif APPROACH == 3:
         # Virtual experiment: similar to approach 2, but using predicted targets
@@ -1194,9 +1324,9 @@ def main():
 
         # First preprocess the data without windowing
         X_train, y_train, feature_names = preprocess_data(
-            train_data, TARGET_COLUMN, EXCLUDED_COLUMNS, SELECTED_FEATURES)
+            train_data, TARGET_COLUMN, EXCLUDED_COLUMNS, SELECTED_FEATURES, file_paths_list=file_paths)
         X_val, y_val, _ = preprocess_data(
-            validation_data, TARGET_COLUMN, EXCLUDED_COLUMNS, SELECTED_FEATURES)
+            validation_data, TARGET_COLUMN, EXCLUDED_COLUMNS, SELECTED_FEATURES, file_paths_list=file_paths)
 
         # Create windowed data (include one previous step)
         window_size = 1
@@ -1205,9 +1335,11 @@ def main():
 
         # Create feature names for windowed data
         window_feature_names = []
+        base_feature_names = feature_names
+
         for w in range(window_size + 1):
             prefix = "" if w == 0 else f"prev{w}_"
-            window_feature_names.extend([f"{prefix}{name}" for name in feature_names])
+            window_feature_names.extend([f"{prefix}{name}" for name in base_feature_names])
         for w in range(1, window_size + 1):
             window_feature_names.append(f"prev{w}_{TARGET_COLUMN}")
 
@@ -1283,6 +1415,14 @@ def main():
             
         # Plot comparison of all models
         plot_model_comparison(all_true_values, all_predictions, APPROACH)
+        
+        # --- NEW: Save Model and Generate Report ---
+        print("\nSaving model artifacts and generating report...")
+        save_model_artifacts(best_model, scaler, window_feature_names)
+        # Note: For virtual experiment, we might want to report the virtual results, 
+        # but for now let's stick to the window approach results for consistency
+        generate_pdf_report(all_true_values, all_predictions, results, window_feature_names, best_model)
+        # -------------------------------------------
 
     else:
         raise ValueError(f"Unknown approach: {APPROACH}")

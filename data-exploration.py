@@ -6,10 +6,12 @@ import seaborn as sns
 
 # Define file paths
 file_paths = [
-    '160508-1021-1000,0min,56kN.csv',
-    '160508-1022-900,0min,56kN.csv',
-    '200508-1023-1350,0min,56kN.csv',
-    '200508-1024-1200,0min,56kN.csv'
+    'data/160508-1021-1000,0min,56kN.csv',
+    'data/160508-1022-900,0min,56kN.csv',
+    'data/200508-1023-1350,0min,56kN.csv',
+    'data/200508-1024-1200,0min,56kN.csv',
+    'data/050608-1037-1200,0min,70kN.csv',
+    'data/290508-1033-1100,0min,70kN.csv'
 ]
 
 
